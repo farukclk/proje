@@ -23,7 +23,14 @@ from flask import Flask, request, jsonify
 import smtplib
 from email.mime.text import MIMEText
 
-from config import EMAIL, PASSWORD, TOKEN
+
+
+
+EMAIL = ""
+PASSWORD = ""
+TOKEN = ""
+
+
 
 
 app = Flask(__name__)
