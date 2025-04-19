@@ -68,11 +68,17 @@
 <script>
 
   // var Socket;
-  let ip = window.location.hostname;
-  console.log(ip);
+
+  const ip  = "10.42.0.242";
+  url  = "http://" + ip;
+
+  url  = "";
+  console.log(url);
+
   let message = "";
   let names = "";
 
+  /*
   Socket = new WebSocket('ws://' + ip + ':81/');
   Socket.onmessage = function(event) {
     console.log(event.data);
@@ -83,7 +89,7 @@
     catch {               }
 
   }
-
+*/
 
 
 
@@ -138,8 +144,8 @@
     }
 
     for (let id in names) {
-      console.log("Key:", id);           // "0", "1"
-      console.log("Value:", names[id]); // "faruk2212"
+      console.log("Key:", id);           
+      console.log("Value:", names[id]); 
 
       let name = names[id];
 
@@ -181,45 +187,54 @@
     }
 
 
-    Socket.send(JSON.stringify({command: 'kayit', name: name}));
+    fetch(`${url}/kayit?name=${encodeURIComponent(name)}`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      }
+    })
+    .then(res => res.text())
+    .then(data => {
+      console.log("Cevap:", data);
+    });
+
+
+
     input.value = "";
 
-    // Socket.send(Json)
 
   }
 
   // İsim sil
   function deleteName(id) {
     if (confirm("Bu kaydı silmek istediğinize emin misiniz?")) {
-      fetch("/delete", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body: "id=" + encodeURIComponent(id)
-      })
-              .then(res => res.text())
-              .then(data => {
-                console.log("Cevap:", data);
-              });
-    }
+    fetch(`${url}/delete?id=${encodeURIComponent(id)}`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      }
+    })
+    .then(res => res.text())
+    .then(data => {
+      console.log("Cevap:", data);
+    });
+  }
   }
 
   function fetchUsers() {
-    fetch("/users")
-            .then(response => response.text())
-            .then(data => {
+    fetch(url + "/users")
+      .then(response => response.text())
+      .then(data => {
               // gelen HTML verisini <ul> içine yaz
               //document.getElementById("user-list").innerHTML = data;
               names = JSON.parse(data);
               console.log(names);
               updateTable();
 
-            })
-            .catch(error => {
+        })
+      .catch(error => {
               console.error("Hata oluştu:", error);
-            });
-
+      });
 
   }
 

@@ -16,15 +16,24 @@ WebSocketsServer webSocket = WebSocketsServer(81);  // WebSocket 81. portta
 // bu bilgilerin silinmemesi gerek, sd carda kaydetmek gerekebilir
 // yada bunları kullanmak yerine her seferde parmak izi sensorunden elde etmek gerek kullanıcı id lerini
 // isimler her harükalde kaydedilmek zorunda
-uint8_t users[128] = {0};          // user listesi
-String name_list[128];            
 
+struct User {
+  bool is_valid;       // Geçerli bir kayıt mı
+  bool is_admin;       // Yönetici mi? true = evet, false = hayır
+  bool can_open_door;  // Kapıyı açma yetkisi var mı?
+  bool is_in;          // Şu anda içeride mi?
+  char name[31];       // Max 30 karakter + null terminator
+
+};
+
+User users[128];
 
 
 unsigned long sonKontrolZamani = 0;
 const unsigned long kontrolAraligi = 1000;     // parmak izi sensorü çalışma frekansı
 const unsigned long kilit_suresi = 5000;       // kilidin açık kalma süresi
-
+uint8_t basarisiz_deneme = 0;                  // üstüste yapilan başarısız deneme sayisi
+const uint8_t DENEME_HAKKI = 100;               //          
 
 // WiFi ağ bilgilerini buraya yaz
 const char* ssid = "es";
@@ -32,8 +41,6 @@ const char* password = "12345678";
 
 
 // Basit HTML arayüz
-// buraya nodemcu nun içine gömmek istediğimiz static html kodu yazılıcak
-// ama şuanlık debug yaptığımız için gerek yok, projenin bitiminde koyucaz
 const char htmlPage[] PROGMEM = R"rawliteral(
 
 <h1> hello world </h1>
@@ -81,29 +88,60 @@ void setup() {
   Serial.println(WiFi.localIP());
 
 
-  // HTTP server
+  // ----------------------   HTTP API   --------------- 
   server.on("/",[](){
-    server.send_P(200, "text/html", htmlPage);  
     server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send_P(200, "text/html", htmlPage);  
   });
+
 
   // userlari json şeklinde gosterir
-  server.on("/users",[](){
-    server.send(200, "application/json", fetch_users());  
+  server.on("/users", HTTP_GET, []() {
     server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
+    server.send(200, "application/json", fetch_users());  
   });
 
-  server.on("/delete", HTTP_POST, []() {
+  // user erişim yetkileri burda düznelenir
+  server.on("/user", HTTP_POST, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
+    server.send(200, "application/json", fetch_users());  
+  });
+
+  // kullanıcı silme işlemi
+  server.on("/delete", HTTP_GET, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
     if (server.hasArg("id")) {
       String id = server.arg("id");
       Serial.println("Silinecek ID: " + id);
       
-      String name = name_list[id.toInt()];
+      int key = delete_user(id.toInt());
+      
+      if (key == 1)
+        server.send(200, "text/plain", "OK");
+      else 
+        server.send(200, "text/plain", "FAILED");    
 
-      delete_user(id.toInt());
-      // Burada id'ye göre kayıt silme işlemi yapılabilir
-      server.send(200, "text/plain", "ID " + id + " : " + name + " silindi.");
     } else {
+      server.send(400, "text/plain", "ID parametresi eksik!");
+    }
+  });
+
+
+    server.on("/kayit", HTTP_GET, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
+    if (server.hasArg("name")) {
+      String name = server.arg("name");
+
+      uint8_t key = enrollFingerprint(name);
+
+      if (key == 1) {
+        server.send(200, "text/plain", "OK");
+        delay(2000);
+      }
+      else
+        server.send(200, "text/plain", "FAILED");
+    }
+    else {
       server.send(400, "text/plain", "ID parametresi eksik!");
     }
   });
@@ -111,6 +149,7 @@ void setup() {
   server.begin();
   Serial.println("HTTP sunucusu başladı.");
   
+  // --------------------------------------------- 
   
   // WebSocket server
   webSocket.begin();
@@ -122,6 +161,7 @@ void setup() {
 
 
 void loop() {
+
   webSocket.loop();
   server.handleClient();
   
@@ -131,64 +171,93 @@ void loop() {
     String gelen_veri = Serial.readStringUntil('\n'); // Enter ile biten veriyi oku
     gelen_veri.trim(); // Baştaki ve sondaki boşlukları temizle
     
-    Serial.print("Alınan veri: ");
-    Serial.println(gelen_veri);
-
-    // yeni kayit ekle
-    if (gelen_veri == "kayit" || gelen_veri.equals("kayit")) {
-      int size = Serial.println(finger.templateCount);
-      Serial.print("size: ");
-      Serial.println(size);
-   //   enrollFingerprint();
-    }
-    // kayitli kullanıcı sayısını getir
-    else if (gelen_veri.equals("sayi")) {
-      int size = Serial.println(finger.templateCount);
-      Serial.print("size: ");
-      Serial.println(size);
-    }
-
   }
 
   // -------------------------
   unsigned long simdi = millis();
+
   if (simdi - sonKontrolZamani >= kontrolAraligi) {
     sonKontrolZamani = simdi;
     
-      int id = getFingerprintID();
+    int id = getFingerprintID();
 
-      // kayit mevcut
-      if (id != -1) {
-        Serial.print("kayıt mevcut:  ");
-        Serial.println(id);
-        digitalWrite(selonoid, HIGH);
-        delay(kilit_suresi);
-        digitalWrite(selonoid, LOW);
-      } 
-      
+    // hatalı okuma
+    if (id == -2) {
+
+    }
+    // kayıtsız kullanıcı
+    else if (id == -1) {
+        basarisiz_deneme++;
+
+        //3.a
+        // alarmı devreye sok
+        if (basarisiz_deneme == DENEME_HAKKI) {
+          basarisiz_deneme++;
+        }
+        else if (basarisiz_deneme > DENEME_HAKKI) {
+        }
+
+        delay(2000);
+
+    }
+    // kayıtlı
+    else if (id >= 0) {
+        
+      //3.a
+      // acil durum protokolu aktif durumda, yalnızca yöneticiye izin var
+      if (basarisiz_deneme > DENEME_HAKKI) {
+        
+          // sistemi normala dondur
+          // alarmı sustur
+          if (users[id].is_admin) {
+            basarisiz_deneme = 0;
+          }
+      }
+      else if (users[id].can_open_door) {
+          Serial.println("kilit açılıyor");
+          digitalWrite(selonoid, HIGH);
+          delay(kilit_suresi);
+          digitalWrite(selonoid, LOW);
+      }
+    }
   }
-
-
-
 }
 
+/*
+  -2 -> hata
+  -1  -> kayıtli değil
+  or user_id
+*/
 
 int getFingerprintID() {
   uint8_t p = finger.getImage();
-  if (p != FINGERPRINT_OK) return -1;
+
+  if (p != FINGERPRINT_OK) {
+    //Serial.println("Parmak algılanmadı.");
+    return -2;
+  }
 
   p = finger.image2Tz();
-  if (p != FINGERPRINT_OK) return -1;
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Parmak izi şablona çevrilemedi.");
+    return -2;
+  }
 
   p = finger.fingerFastSearch();
-  if (p != FINGERPRINT_OK) return -1;
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Eşleşen parmak izi bulunamadı.");
+    return -1;
+  }
 
   int id = finger.fingerID;
 
 
-  // parmak bulundu fakat users listesinde de olması gerek
-  // hafıza kartı entegrasyonu yaptıktan sonra burayi silebilirsin
-  if (users[id] == 0) return -1;
+  int confidence = finger.confidence;
+
+  Serial.print("Kayıt bulundu! ID: ");
+  Serial.print(id);
+  Serial.print(" Güven: ");
+  Serial.println(confidence);
 
   return id;
 }
@@ -201,7 +270,7 @@ int getFingerprintID() {
 */ 
 uint8_t enrollFingerprint(String name) {
   int id = get_empty_index();
-  Serial.print("size: ");
+  Serial.print("index: ");
   Serial.println(id);
   if (id == -1) {
     Serial.println("kapasite dolu [!]");
@@ -234,15 +303,20 @@ uint8_t enrollFingerprint(String name) {
 
   p = finger.storeModel(id);
   if (p == FINGERPRINT_OK) {
+   
+    users[id].is_valid = true;
+    users[id].is_admin = false;
+    users[id].can_open_door = true;
+    snprintf(users[id].name, sizeof(users[id].name), "%s", name);
+  
+    
     Serial.println("✅ Parmak kaydedildi!");
-    users[id] = 1;
-    name_list[id] = name;
     return 1;
-  } else {
+  } 
+  else {
     Serial.println("❌ Kaydetme başarısız.");
     return 0;
   }
-
 }
 
 
@@ -250,14 +324,12 @@ uint8_t enrollFingerprint(String name) {
 // user eklemek için user dizsindeki ilk boş yeri return eder
 int get_empty_index() {
   for (int i = 0; i < 128; i++) {
-    if (users[i] == 0)
+    if (users[i].is_valid == false)
       return i;
   }
 
   return -1; // dizi tam dolu
 }
-
-
 
 
 
@@ -285,12 +357,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 
     // Artık JSON içeriğini kullanabilirsin
     String command = doc["command"]; 
-    //String data = doc["data"];     
-
-
     Serial.println("command: " + command);
-    //Serial.println("data: " + data);
-
 
 
 
@@ -304,50 +371,16 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
     else if(command.equals("led0")) {
       Serial.println("ledi sodur");
       digitalWrite(LED_BUILTIN, HIGH);  
-      webSocket.broadcastTXT("led kapali artık");
-      
+      webSocket.broadcastTXT("led kapali artık"); 
     }
-     //------------- yeni kayit ekle
-     if (command.equals("kayit")) {
-      String name = doc["name"];     
-      int status = enrollFingerprint(name);
-      // kayit başarılı
-      if (status == 1) {
-        webSocket.broadcastTXT("kayit başarili");
-        delay(2000);  // 2 saniye bekle
-      }
-      // başarısız
-      else if (status == 0) {
-        webSocket.broadcastTXT("kayit başarısız oldu");
-      }
-      // hafiza dolu hatasi
-      else if (status == 2) {
-        webSocket.broadcastTXT("hafiza dolu");
-      }
-    }
+
     //-------------- kayitli kullanıcı sayısını getir
     else if (command.equals("sayi")) {
       int size = finger.templateCount;
       String mesaj = "size:" + String(size);
       webSocket.broadcastTXT(mesaj);
     }
-    // ------------------ kullanıcıyı sil
-    else if (command.equals("delete")) {
-      int id  = doc["id"];
 
-      uint8_t result = finger.deleteModel(id);
-      if (result == FINGERPRINT_OK) {
-        Serial.println("Kayıt silindi.");
-      } else if (result == FINGERPRINT_PACKETRECIEVEERR) {
-        Serial.println("İletişim hatası.");
-      } else if (result == FINGERPRINT_BADLOCATION) {
-        Serial.println("ID bulunamadı.");
-      } else if (result == FINGERPRINT_FLASHERR) {
-        Serial.println("Silme hatası (flash).");
-      } else {
-        Serial.println("Bilinmeyen hata.");
-      }
-    }
     // ---------------- parmak izini formatla, tüm kayıtları sil
     else if (command.equals("format")) {
       if (finger.emptyDatabase() == FINGERPRINT_OK) {
@@ -364,11 +397,16 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 
 
 // direkt sil geç, yoksa da yok
-void delete_user(uint8_t id) {
+int delete_user(uint8_t id) {
 
   uint8_t result = finger.deleteModel(id);
   if (result == FINGERPRINT_OK) {
+    
+     // isim verisini de kalıcı sil
+    users[id].is_valid = false;
+    snprintf(users[id].name, sizeof(users[id].name), "%s", "");
     Serial.println("Kayıt silindi.");
+    return 1;
   } else if (result == FINGERPRINT_PACKETRECIEVEERR) {
     Serial.println("İletişim hatası.");
   } else if (result == FINGERPRINT_BADLOCATION) {
@@ -379,21 +417,22 @@ void delete_user(uint8_t id) {
     Serial.println("Bilinmeyen hata.");
   }
   
-  users[id] = 0;
- 
+  return 0;
 }
 
 
-String fetch_users() {
 
+/*
+  kayıtlı tüm kullanıcıları JSON şeklinde return eder
+*/
+String fetch_users() {
 
   // JSON oluştur
   StaticJsonDocument<200> doc;
 
-  for (int i = 0; i < 128; i++) {
-    if (users[i] != 0) {
-      doc[String(i)] =  name_list[i];
-    
+  for (int id = 0; id < 128; id++) {
+    if (users[id].is_valid == 1) {
+      doc[String(id)] =  users[id].name;
     }
   }
 
@@ -401,10 +440,7 @@ String fetch_users() {
   // JSON string olarak yaz
   String jsonString;
   serializeJson(doc, jsonString);
-    
-  Serial.println("JSON Gönderiliyor:");
-  Serial.println(jsonString);
-
+  
   return jsonString;
 
 

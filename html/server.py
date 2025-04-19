@@ -44,14 +44,19 @@ SMTP_PORT = 465
 
 # maillerin gonderileceği adreslerin listesi
 email_list = [
-	"farukcelikclk@gmail.com",
+	"vahsikelebekler@yandex.com",
 	
 ]
 
 
+file = open("index.html", "r")
+html = file.read()
+file.close()
+
+
 @app.route("/")
 def test():
-	return "hi"
+	return html
 
 
 # gunluk rapor gonderme şeysi
@@ -93,7 +98,7 @@ if __name__ == "__main__":
 	app.run(
 		ssl_context=('cert.pem', 'key.pem'),
 		host='0.0.0.0',
-        port=8443,   # 443 için sudo gerekebilir, o yüzden 8443 kullanıyoruz
+       #port=8443,   # 443 için sudo gerekebilir, o yüzden 8443 kullanıyoruz
         debug=True
     )
 
