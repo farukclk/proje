@@ -8,6 +8,8 @@
       max-width: 600px;
       margin: 0 auto;
       padding: 20px;
+      background-color: black;
+      color: blue;
     }
     .input-section {
       display: flex;
@@ -70,16 +72,16 @@
   // var Socket;
 
   const ip  = "10.42.0.242";
-  url  = "http://" + ip;
+  url  = "https://" + ip;
 
-  url  = "";
+ // url  = "";
   console.log(url);
 
   let message = "";
   let names = "";
 
-  /*
-  Socket = new WebSocket('ws://' + ip + ':81/');
+
+  Socket = new WebSocket('wss://' + ip + ':81/');
   Socket.onmessage = function(event) {
     console.log(event.data);
     try {
@@ -89,7 +91,6 @@
     catch {               }
 
   }
-*/
 
 
 

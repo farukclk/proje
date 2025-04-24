@@ -1,32 +1,21 @@
 #include <Adafruit_Fingerprint.h>
 #include <SoftwareSerial.h>
-
 #include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
+#include <WiFiClientSecure.h>
+#include <ESP8266WebServerSecure.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
+#include "config.h"
+
 
 SoftwareSerial mySerial(D5, D6); // RX, TX (GPIO14, GPIO12)
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 
-ESP8266WebServer server(80);
+ESP8266WebServerSecure server(443);
+BearSSL::X509List cert(serverCert);
+BearSSL::PrivateKey key(serverKey);
 WebSocketsServer webSocket = WebSocketsServer(81);  // WebSocket 81. portta
 
-
-// bu bilgilerin silinmemesi gerek, sd carda kaydetmek gerekebilir
-// yada bunları kullanmak yerine her seferde parmak izi sensorunden elde etmek gerek kullanıcı id lerini
-// isimler her harükalde kaydedilmek zorunda
-
-struct User {
-  bool is_valid;       // Geçerli bir kayıt mı
-  bool is_admin;       // Yönetici mi? true = evet, false = hayır
-  bool can_open_door;  // Kapıyı açma yetkisi var mı?
-  bool is_in;          // Şu anda içeride mi?
-  char name[31];       // Max 30 karakter + null terminator
-
-};
-
-User users[128];
 
 
 unsigned long sonKontrolZamani = 0;
@@ -35,32 +24,43 @@ const unsigned long kilit_suresi = 5000;       // kilidin açık kalma süresi
 uint8_t basarisiz_deneme = 0;                  // üstüste yapilan başarısız deneme sayisi
 const uint8_t DENEME_HAKKI = 100;               //          
 
-// WiFi ağ bilgilerini buraya yaz
-const char* ssid = "es";
-const char* password = "12345678";
-
 
 // Basit HTML arayüz
 const char htmlPage[] PROGMEM = R"rawliteral(
-
 <h1> hello world </h1>
-
-  )rawliteral";
+)rawliteral";
   
 
 int selonoid = D2;
 
 
+// bu bilgilerin silinmemesi gerek, sd carda kaydetmek gerekebilir
+// yada bunları kullanmak yerine her seferde parmak izi sensorunden elde etmek gerek kullanıcı id lerini
+// isimler her harükalde kaydedilmek zorunda
+
+struct User {
+  uint8_t is_valid : 1;
+  uint8_t is_admin : 1;
+  uint8_t can_open_door : 1;
+  uint8_t is_in : 1;
+  uint8_t reserved : 4;
+  char name[20];       // Max 30 karakter + null terminator
+};
+
+User users[100];
+
+
+
 
 void setup() {
+  Serial.begin(115200);
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(selonoid, OUTPUT);
   digitalWrite(selonoid, LOW);
 
-  Serial.begin(9600);
-  
-  delay(100);
-  Serial.println("R307 parmak izi sensörü başlatılıyor...");
+  WiFi.begin(ssid, password);
+
+
   finger.begin(57600);
   if (finger.verifyPassword()) {
     Serial.println("✓ Sensör bulundu!");
@@ -73,27 +73,27 @@ void setup() {
   }
 
 
-  // wifi
-  WiFi.begin(ssid, password);
-  delay(100);
 
-  // Bağlantı sağlanana kadar bekle
+  Serial.println("Bağlanılıyor...");
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+    delay(1000);
     Serial.print(".");
   }
 
-  Serial.println("\nWiFi Bağlandı!");
-  Serial.print("IP Adresi: ");
+  Serial.println("\nIP adresi: ");
   Serial.println(WiFi.localIP());
+
+  server.getServer().setRSACert(&cert, &key);
+
+
 
 
   // ----------------------   HTTP API   --------------- 
+
   server.on("/",[](){
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send_P(200, "text/html", htmlPage);  
   });
-
 
   // userlari json şeklinde gosterir
   server.on("/users", HTTP_GET, []() {
@@ -119,15 +119,11 @@ void setup() {
       if (key == 1)
         server.send(200, "text/plain", "OK");
       else 
-        server.send(200, "text/plain", "FAILED");    
-
-    } else {
-      server.send(400, "text/plain", "ID parametresi eksik!");
+        server.send(200, "text/plain", "FAILED");
     }
   });
 
-
-    server.on("/kayit", HTTP_GET, []() {
+  server.on("/kayit", HTTP_GET, []() {
     server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
     if (server.hasArg("name")) {
       String name = server.arg("name");
@@ -141,22 +137,18 @@ void setup() {
       else
         server.send(200, "text/plain", "FAILED");
     }
-    else {
-      server.send(400, "text/plain", "ID parametresi eksik!");
-    }
   });
-  
+
+
+
   server.begin();
-  Serial.println("HTTP sunucusu başladı.");
-  
-  // --------------------------------------------- 
-  
+
+
   // WebSocket server
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
   Serial.println("WebSocket sunucusu başladı.");
-
-
+  
 }
 
 
@@ -222,6 +214,8 @@ void loop() {
     }
   }
 }
+
+
 
 /*
   -2 -> hata
