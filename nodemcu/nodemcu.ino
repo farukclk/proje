@@ -5,10 +5,16 @@
 #include <ESP8266WebServerSecure.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
+#include <FS.h>
+#include <SD.h>
+#include <SPI.h>
 #include "config.h"
 
 
-SoftwareSerial mySerial(D5, D6); // RX, TX (GPIO14, GPIO12)
+SoftwareSerial unoSerial(D0, D1); // RX, TX
+
+
+SoftwareSerial mySerial(D2, D3); // RX, TX (GPIO14, GPIO12)
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 
 ESP8266WebServerSecure server(443);
@@ -22,7 +28,7 @@ unsigned long sonKontrolZamani = 0;
 const unsigned long kontrolAraligi = 1000;     // parmak izi sensorü çalışma frekansı
 const unsigned long kilit_suresi = 5000;       // kilidin açık kalma süresi
 uint8_t basarisiz_deneme = 0;                  // üstüste yapilan başarısız deneme sayisi
-const uint8_t DENEME_HAKKI = 100;               //          
+const uint8_t DENEME_HAKKI = 10;              //          
 
 
 // Basit HTML arayüz
@@ -31,12 +37,9 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 )rawliteral";
   
 
-int selonoid = D2;
+int selonoid = D4;
 
 
-// bu bilgilerin silinmemesi gerek, sd carda kaydetmek gerekebilir
-// yada bunları kullanmak yerine her seferde parmak izi sensorunden elde etmek gerek kullanıcı id lerini
-// isimler her harükalde kaydedilmek zorunda
 
 struct User {
   uint8_t is_valid : 1;
@@ -47,19 +50,94 @@ struct User {
   char name[20];       // Max 30 karakter + null terminator
 };
 
-User users[100];
+const int user_count = 100;
+User users[user_count] = {};
 
 
+File file;
+String file_name = "/b.txt";
+#define SD_CS D8  // Chip Select pini
 
 
 void setup() {
   Serial.begin(115200);
-  pinMode(LED_BUILTIN, OUTPUT);
+  unoSerial.begin(9600);
   pinMode(selonoid, OUTPUT);
   digitalWrite(selonoid, LOW);
+  delay(2000);
+  Serial.println("başlado");
+
+
+
+  if (!SD.begin(SD_CS)) {
+    Serial.println("SD kart başlatılamadı!");
+    return;
+  }
+
+   // dosyayı  dosyasını açmayı dene
+  file = SD.open(file_name, FILE_READ);
+  
+  if (!file) {
+     Serial.println("dosya bulunamadı, oluşturuluyor...");
+     File file = SD.open(file_name, FILE_WRITE);
+ 
+     if (file) {
+       for (int i = 0; i < user_count; i++) {
+         file.println(); // boş satır yaz
+       }
+       file.close();
+       Serial.println("boş dosya oluşturuldu.");
+     } else {
+       Serial.println("dosya oluşturulamadı!");
+     }
+  } 
+  else {
+     Serial.println("dosya bulundu, okunuyor...");
+  
+     int satirNumarasi = 0;
+     while (file.available()) {
+       String satir = file.readStringUntil('\n');
+       satir.trim(); // boşlukları temizle
+ 
+       if (satir.length() > 0) {
+         int virgulIndex = satir.indexOf(',');
+ 
+         if (virgulIndex != -1) {
+          String id = satir.substring(0, virgulIndex);
+          String isim = satir.substring(virgulIndex + 1);
+          Serial.println("ID: " + id + ", Isim: " + isim);
+
+          users[id.toInt()].is_valid = true;
+          users[id.toInt()].can_open_door = true;
+          snprintf(users[id.toInt()].name, sizeof(users[id.toInt()].name), "%s", isim);
+
+         } else {
+           Serial.println("Hatalı satır: " + satir);
+         }
+       }
+ 
+       satirNumarasi++;
+       if (satirNumarasi >= user_count) break;
+     }
+     file.close();
+     Serial.println("Okuma tamamlandı.");
+  }
+
 
   WiFi.begin(ssid, password);
+  Serial.println("Bağlanılıyor...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
 
+  Serial.println("\nIP adresi: ");
+  Serial.println(WiFi.localIP());
+  unoSerial.println("ip adresi:|" + WiFi.localIP().toString());
+  delay(5000);
+
+
+  server.getServer().setRSACert(&cert, &key);
 
   finger.begin(57600);
   if (finger.verifyPassword()) {
@@ -71,20 +149,6 @@ void setup() {
   else {
     Serial.println("✗ Sensör bulunamadı!");
   }
-
-
-
-  Serial.println("Bağlanılıyor...");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
-  }
-
-  Serial.println("\nIP adresi: ");
-  Serial.println(WiFi.localIP());
-
-  server.getServer().setRSACert(&cert, &key);
-
 
 
 
@@ -132,12 +196,29 @@ void setup() {
 
       if (key == 1) {
         server.send(200, "text/plain", "OK");
-        delay(2000);
+        delay(3000);
       }
-      else
+      else {
         server.send(200, "text/plain", "FAILED");
+        delay(3000);
+      }
+
+      unoSerial.println("parmak okut");
+  
     }
   });
+
+    // user erişim yetkileri burda düznelenir
+    server.on("/lcd", HTTP_GET, []() {
+      server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
+      if (server.hasArg("msg")) {
+        String msg = server.arg("msg");
+        unoSerial.println(msg); 
+        server.send(200, "text/plain", "OK");
+      }
+      else 
+        server.send(200, "text/plain", "FAILED");
+    });
 
 
 
@@ -149,13 +230,18 @@ void setup() {
   webSocket.onEvent(webSocketEvent);
   Serial.println("WebSocket sunucusu başladı.");
   
+  unoSerial.println("parmak okut");
+  
 }
 
 
 void loop() {
-
+  //unoSerial.println("hi|as");
+  //Serial.println("gonderildi");
+  //delay(100000);
   webSocket.loop();
   server.handleClient();
+ 
   
   if(Serial.available() > 0) { 
     //webSocket.broadcastTXT(c, sizeof(c));
@@ -184,13 +270,18 @@ void loop() {
         //3.a
         // alarmı devreye sok
         if (basarisiz_deneme == DENEME_HAKKI) {
-          basarisiz_deneme++;
+          unoSerial.println("ALARM!!!");
         }
+        // alarm çoktan devrede
         else if (basarisiz_deneme > DENEME_HAKKI) {
         }
+        else {
+          unoSerial.println("kayit bulunamadi");
+          delay(3000);
+          unoSerial.println("parmak okut");
+        }
 
-        delay(2000);
-
+      
     }
     // kayıtlı
     else if (id >= 0) {
@@ -206,10 +297,13 @@ void loop() {
           }
       }
       else if (users[id].can_open_door) {
-          Serial.println("kilit açılıyor");
-          digitalWrite(selonoid, HIGH);
-          delay(kilit_suresi);
-          digitalWrite(selonoid, LOW);
+        basarisiz_deneme = 0;
+        Serial.println("kilit acılıyor");
+        unoSerial.println("kilit acildi");
+        digitalWrite(selonoid, HIGH);
+        delay(kilit_suresi);
+        digitalWrite(selonoid, LOW);
+        unoSerial.println("parmak okut");
       }
     }
   }
@@ -272,6 +366,7 @@ uint8_t enrollFingerprint(String name) {
   }
   int p = -1;
   Serial.println("Parmak yerleştir...");
+  unoSerial.println("Parmak yerleştir...");
   while (p != FINGERPRINT_OK) {
     p = finger.getImage();
   }
@@ -280,20 +375,30 @@ uint8_t enrollFingerprint(String name) {
   if (p != FINGERPRINT_OK) { Serial.println("Görüntü dönüştürülemedi."); return 0; }
 
   Serial.println("Parmağı kaldır...");
+  unoSerial.println("Parmağı kaldır...");
   delay(2000);
   while (finger.getImage() != FINGERPRINT_NOFINGER);
 
   Serial.println("Aynı parmağı tekrar yerleştir...");
+  unoSerial.println("Aynı parmağı tekrar yerleştir...");
   p = -1;
   while (p != FINGERPRINT_OK) {
     p = finger.getImage();
   }
 
   p = finger.image2Tz(2);
-  if (p != FINGERPRINT_OK) { Serial.println("2. görüntü dönüştürülemedi."); return 0; }
+  if (p != FINGERPRINT_OK) {
+    Serial.println("2. görüntü dönüştürülemedi.");
+    unoSerial.println("2. görüntü dönüştürülemedi.");
+    return 0; 
+    }
 
   p = finger.createModel();
-  if (p != FINGERPRINT_OK) { Serial.println("Model oluşturulamadı."); return 0; }
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Model oluşturulamadı.");
+    unoSerial.println("Model oluşturulamadı.");
+    return 0;
+  }
 
   p = finger.storeModel(id);
   if (p == FINGERPRINT_OK) {
@@ -305,10 +410,15 @@ uint8_t enrollFingerprint(String name) {
   
     
     Serial.println("✅ Parmak kaydedildi!");
+    unoSerial.println("✅ Parmak kaydedildi!");
+    kaydet_id_ve_isim(id, name);                // hafiza kartına da kaydet
+
+
     return 1;
   } 
   else {
     Serial.println("❌ Kaydetme başarısız.");
+    unoSerial.println("❌ Kaydetme başarısız.");
     return 0;
   }
 }
@@ -324,6 +434,57 @@ int get_empty_index() {
 
   return -1; // dizi tam dolu
 }
+
+
+
+void kaydet_id_ve_isim(int id, String isim) {
+  String lines[user_count];  // maksimum 500 satır destekliyor
+  int lineCount = 0;
+
+  // 1. aşama: mevcut dosyayı oku
+  File file = SD.open(file_name, FILE_READ);
+  if (file) {
+    while (file.available()) {
+      lines[lineCount] = file.readStringUntil('\n');
+      lines[lineCount].trim();
+      lineCount++;
+    }
+    file.close();
+  } else {
+    Serial.println("Dosya açılamadı (okuma aşaması).");
+    return;
+  }
+
+  // 2. aşama: boş satırları doldur
+  int satir_numarasi = id + 1; // çünkü 0. id -> 1. satır demek
+  if (lineCount < satir_numarasi) {
+    for (int i = lineCount; i < satir_numarasi; i++) {
+      lines[i] = "";
+    }
+    lineCount = satir_numarasi;
+  }
+
+  // 3. aşama: ilgili satırı değiştir
+  int index = satir_numarasi - 1; // dizide 0 tabanlı
+  lines[index] = String(id) + "," + isim;
+
+  // 4. aşama: dosyayı baştan yaz
+  file = SD.open(file_name, FILE_WRITE);
+  if (file) {
+    file.seek(0);
+    file.truncate(0); // eski içeriği sil
+
+    for (int i = 0; i < lineCount; i++) {
+      file.println(lines[i]);
+    }
+
+    file.close();
+    Serial.println("Yazma tamam.");
+  } else {
+    Serial.println("Dosya açılamadı (yazma aşaması).");
+  }
+}
+
 
 
 
@@ -390,6 +551,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 }
 
 
+
 // direkt sil geç, yoksa da yok
 int delete_user(uint8_t id) {
 
@@ -436,6 +598,5 @@ String fetch_users() {
   serializeJson(doc, jsonString);
   
   return jsonString;
-
-
 }
+
