@@ -1,0 +1,77 @@
+body {
+	font-family: Arial, sans-serif;
+	max-width: 800px;
+	margin: 0 auto;
+	padding: 20px;
+	background-color: #000;
+	color: #3ff59a;
+	position: relative;
+  }
+  
+table {
+	width: 100%;
+	border-collapse: collapse;
+	margin-top: 20px;
+  }
+  
+  th, td {
+	padding: 10px;
+	text-align: left;
+  }
+  
+  tr {
+	border-bottom: 1px solid #555;
+  }
+  
+  .green {
+	color: #00e676;
+	font-weight: bold;
+  }
+  
+  .red {
+	color: #ff1744;
+	font-weight: bold;
+  }
+  
+  input[type="checkbox"] {
+	margin-right: 5px;
+	transform: scale(1.2);
+  }
+  
+  label {
+	cursor: pointer;
+	user-select: none;
+  }
+  
+  #batteryStatus {
+	position: absolute;
+	top: 20px;
+	right: 20px;
+	font-size: 24px;
+  }
+  
+  .charging {
+	color: #76ff03;
+  }
+  
+  .battery {
+	color: #ffeb3b;
+  }
+  
+  .unknown {
+	color: #888;
+  }
+  
+
+  #addUserForm {
+	margin: 20px 0;
+  }
+  #addUserForm input {
+	padding: 5px;
+	font-size: 16px;
+  }
+  #addUserForm button {
+	padding: 5px 10px;
+	font-size: 16px;
+	cursor: pointer;
+  }

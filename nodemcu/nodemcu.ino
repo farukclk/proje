@@ -1,13 +1,13 @@
 #include <Adafruit_Fingerprint.h>
 #include <SoftwareSerial.h>
 #include <ESP8266WiFi.h>
-#include <WiFiClientSecure.h>
 #include <ESP8266WebServerSecure.h>
-#include <WebSocketsServer.h>
 #include <ArduinoJson.h>
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
+#include <time.h>
+#include <FS.h>         // SPIFFS için
 #include "config.h"
 
 
@@ -17,27 +17,47 @@ SoftwareSerial unoSerial(D0, D1); // RX, TX
 SoftwareSerial mySerial(D2, D3); // RX, TX (GPIO14, GPIO12)
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 
+
+/*
 ESP8266WebServerSecure server(443);
 BearSSL::X509List cert(serverCert);
 BearSSL::PrivateKey key(serverKey);
-WebSocketsServer webSocket = WebSocketsServer(81);  // WebSocket 81. portta
+*/
+
+
+ESP8266WebServer server(80);  // Port 80 (HTTP için yaygın port)
+
+
+WiFiClientSecure client;
+const char* host = "vahsikelebekler.pythonanywhere.com";
+const int httpsPort = 443;
+const String url = "/rapor";
+const char fingerprint[] = "8F:89:21:9B:B6:AA:EC:5B:A7:20:9A:BC:F9:D0:A5:26:B6:E3:79:32"; // SHA-1 fingerprint
 
 
 
 unsigned long sonKontrolZamani = 0;
-const unsigned long kontrolAraligi = 1000;     // parmak izi sensorü çalışma frekansı
+const unsigned long kontrolAraligi = 1100;     // parmak izi sensorü çalışma frekansı
 const unsigned long kilit_suresi = 5000;       // kilidin açık kalma süresi
 uint8_t basarisiz_deneme = 0;                  // üstüste yapilan başarısız deneme sayisi
-const uint8_t DENEME_HAKKI = 10;              //          
+const uint8_t DENEME_HAKKI = 10;               //          
 
 
 // Basit HTML arayüz
 const char htmlPage[] PROGMEM = R"rawliteral(
 <h1> hello world </h1>
 )rawliteral";
+
+
+const char html[] PROGMEM = R"rawliteral(<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8"><title>Kullanıcı Düzenleme Paneli</title><link rel="stylesheet" href="http://samsung/a.css"><style>#addUserForm{margin:20px 0}#addUserForm input{padding:5px;font-size:16px}#addUserForm button{padding:5px 10px;font-size:16px;cursor:pointer}</style></head><body><h1>Kullanıcı Özellikleri</h1><div id="batteryStatus" class="unknown" title="Şarj Durumu">❔</div><div id="addUserForm"><input type="text" id="nameInput" placeholder="İsim girin"><button onclick="addName()">Ekle</button></div><table id="userTable"><thead><tr><th>ID</th><th>İsim</th><th>İçeride mi?</th><th>Admin</th><th>Kapıyı Açabilir mi?</th><th>Sil</th></tr></thead><tbody></tbody></table><script src="http://fedora/a.js"></script></body></html>)rawliteral";
+
   
 
+
+
 int selonoid = D4;
+unsigned long unlockTime = 0;
+bool isUnlocked = false;
 
 
 
@@ -47,97 +67,110 @@ struct User {
   uint8_t can_open_door : 1;
   uint8_t is_in : 1;
   uint8_t reserved : 4;
-  char name[20];       // Max 30 karakter + null terminator
+  char name[21];       
 };
 
-const int user_count = 100;
+const int user_count = 50;
 User users[user_count] = {};
 
 
 File file;
-String file_name = "/b.txt";
+String usersFileName = "/users.txt";
+String logFileName = "/logs.txt";   // Log dosyasının adı
 #define SD_CS D8  // Chip Select pini
+
+
+// İstanbul için saat dilimi (UTC+3)
+const long gmtOffset_sec = 3 * 3600;
+const int daylightOffset_sec = 0; // Yaz saati uygulaması yoksa 0
+
+
+
+
 
 
 void setup() {
   Serial.begin(115200);
   unoSerial.begin(9600);
+
+
   pinMode(selonoid, OUTPUT);
   digitalWrite(selonoid, LOW);
-  delay(2000);
-  Serial.println("başlado");
+ 
 
 
-
-  if (!SD.begin(SD_CS)) {
-    Serial.println("SD kart başlatılamadı!");
+  if (!SPIFFS.begin()) {
+    Serial.println("SPIFFS başlatılamadı!");
     return;
   }
 
-   // dosyayı  dosyasını açmayı dene
-  file = SD.open(file_name, FILE_READ);
+  delay(1000);
   
-  if (!file) {
-     Serial.println("dosya bulunamadı, oluşturuluyor...");
-     File file = SD.open(file_name, FILE_WRITE);
- 
-     if (file) {
-       for (int i = 0; i < user_count; i++) {
-         file.println(); // boş satır yaz
-       }
-       file.close();
-       Serial.println("boş dosya oluşturuldu.");
-     } else {
-       Serial.println("dosya oluşturulamadı!");
-     }
-  } 
-  else {
-     Serial.println("dosya bulundu, okunuyor...");
-  
-     int satirNumarasi = 0;
-     while (file.available()) {
-       String satir = file.readStringUntil('\n');
-       satir.trim(); // boşlukları temizle
- 
-       if (satir.length() > 0) {
-         int virgulIndex = satir.indexOf(',');
- 
-         if (virgulIndex != -1) {
+
+  if (!SPIFFS.exists(logFileName)) {
+    Serial.println("Dosya bulunamadı, oluşturuluyor...");
+    File file = SPIFFS.open(logFileName, "w");
+    if (file) {
+      file.println();
+      file.close();
+      Serial.println("Boş log dosya oluşturuldu.");
+    }
+    else {
+      Serial.println("Dosya log oluşturulamadı!");
+    }
+  } else {
+    Serial.println("Dosya log bulundu, okunuyor...");
+    get_logs();
+  }
+
+
+
+  if (!SPIFFS.exists(usersFileName)) {
+    Serial.println("Dosya bulunamadı, oluşturuluyor...");
+    File file = SPIFFS.open(usersFileName, "w");
+    if (file) {
+      for (int i = 0; i < user_count; i++) {
+        file.println();
+      }
+      file.close();
+      Serial.println("Boş dosya oluşturuldu.");
+    } else {
+      Serial.println("Dosya oluşturulamadı!");
+    }
+  } else {
+    Serial.println("Dosya bulundu, okunuyor...");
+
+
+    File file = SPIFFS.open(usersFileName, "r");
+    int satirNumarasi = 0;
+
+    while (file.available()) {
+      String satir = file.readStringUntil('\n');
+      satir.trim();
+
+      if (satir.length() > 0) {
+        int virgulIndex = satir.indexOf(',');
+        if (virgulIndex != -1) {
           String id = satir.substring(0, virgulIndex);
           String isim = satir.substring(virgulIndex + 1);
-          Serial.println("ID: " + id + ", Isim: " + isim);
+          Serial.println("ID: " + id + ", İsim: " + isim);
 
           users[id.toInt()].is_valid = true;
           users[id.toInt()].can_open_door = true;
-          snprintf(users[id.toInt()].name, sizeof(users[id.toInt()].name), "%s", isim);
+          snprintf(users[id.toInt()].name, sizeof(users[id.toInt()].name), "%s", isim.c_str());
+        } else {
+          Serial.println("Hatalı satır: " + satir);
+        }
+      }
 
-         } else {
-           Serial.println("Hatalı satır: " + satir);
-         }
-       }
- 
-       satirNumarasi++;
-       if (satirNumarasi >= user_count) break;
-     }
-     file.close();
-     Serial.println("Okuma tamamlandı.");
+      satirNumarasi++;
+      if (satirNumarasi >= user_count) break;
+    }
+
+    file.close();
+    Serial.println("Okuma tamamlandı.");
   }
 
-
-  WiFi.begin(ssid, password);
-  Serial.println("Bağlanılıyor...");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
-  }
-
-  Serial.println("\nIP adresi: ");
-  Serial.println(WiFi.localIP());
-  unoSerial.println("ip adresi:|" + WiFi.localIP().toString());
-  delay(5000);
-
-
-  server.getServer().setRSACert(&cert, &key);
 
   finger.begin(57600);
   if (finger.verifyPassword()) {
@@ -152,18 +185,104 @@ void setup() {
 
 
 
+
+
+  delay(1000);   // uno açılış mesajı için bekle
+
+  WiFi.begin(ssid, password);
+  Serial.println("Bağlanılıyor...");
+  unoSerial.println("Wifi agi|taraniyor..");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+
+  Serial.println("\nIP adresi: ");
+  Serial.println(WiFi.localIP());
+  unoSerial.println("ip adresi:|" + WiFi.localIP().toString());
+
+  // NTP sunucusunu ayarla
+  configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
+  Serial.println("Zaman senkronize ediliyor...");
+  
+  //delay(5000);
+  printLocalTime();
+
+
+
+
+
+
+
+
+
+
+
+
+
+  client.setFingerprint(fingerprint); // Sertifika doğrulaması
+
+  Serial.print("Sunucuya bağlanılıyor: ");
+  Serial.println(host);
+
+  if (!client.connect(host, httpsPort)) {
+    Serial.println("Bağlantı başarısız!");
+   // return;
+  }
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+
   // ----------------------   HTTP API   --------------- 
+ // server.getServer().setRSACert(&cert, &key);
+
 
   server.on("/",[](){
     server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send_P(200, "text/html", html);  
+  });
+
+
+
+
+  server.on("/hi",[](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send_P(200, "text/html", htmlPage);  
   });
+
 
   // userlari json şeklinde gosterir
   server.on("/users", HTTP_GET, []() {
     server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
     server.send(200, "application/json", fetch_users());  
   });
+
+  
+  // giriş çıkış loglarını return eder
+  server.on("/logs", HTTP_GET, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
+    server.send(200, "application/json", get_logs());  
+  });
+  
 
   // user erişim yetkileri burda düznelenir
   server.on("/user", HTTP_POST, []() {
@@ -203,13 +322,15 @@ void setup() {
         delay(3000);
       }
 
-      unoSerial.println("parmak okut");
+     // unoSerial.println("parmak okut");
+      unoSerial.println("Giris modunda   |Parmak bekleniyor");
   
     }
   });
+  
 
-    // user erişim yetkileri burda düznelenir
-    server.on("/lcd", HTTP_GET, []() {
+  // user erişim yetkileri burda düznelenir
+  server.on("/lcd", HTTP_GET, []() {
       server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
       if (server.hasArg("msg")) {
         String msg = server.arg("msg");
@@ -218,55 +339,87 @@ void setup() {
       }
       else 
         server.send(200, "text/plain", "FAILED");
+  });
+
+  server.on("/format", HTTP_GET, []() {
+      server.sendHeader("Access-Control-Allow-Origin", "*");
+      
+      for (int i = 0; i < user_count; i++)
+        users[i].is_valid = 0;
+      
+      if (SPIFFS.exists(usersFileName)) {
+        SPIFFS.remove(usersFileName);
+        Serial.println("users.txt silindi.");
+      }
+    
+      if (SPIFFS.exists(logFileName)) {
+        SPIFFS.remove(logFileName);
+        Serial.println("logs.txt silindi.");
+      }
+
+      if (finger.emptyDatabase() == FINGERPRINT_OK) 
+        server.send(200, "text/plain", "OK");
+      else 
+        server.send(200, "text/plain", "FAILED");
+      
     });
+  
+  // durum bilgisini dondurur, şarj-durumu,giriş yapan_kişi
+  server.on("/sarj", HTTP_GET, []() {
+
+    int val = analogRead(A0);  // 0–1023 (0V–1V arası)
+    Serial.print("Analog Değer: ");
+    Serial.println(val);
+  
+    if (val > 200) {
+      server.send(200, "text/plain", "YES");
+
+    } 
+    else {
+      server.send(200, "text/plain", "NO");
+    }
+});
+
 
 
 
   server.begin();
+  unoSerial.println("Giris modunda|Parmak okutunuz");
 
-
-  // WebSocket server
-  webSocket.begin();
-  webSocket.onEvent(webSocketEvent);
-  Serial.println("WebSocket sunucusu başladı.");
-  
-  unoSerial.println("parmak okut");
-  
 }
 
 
+
+
 void loop() {
-  //unoSerial.println("hi|as");
-  //Serial.println("gonderildi");
-  //delay(100000);
-  webSocket.loop();
-  server.handleClient();
- 
   
-  if(Serial.available() > 0) { 
-    //webSocket.broadcastTXT(c, sizeof(c));
 
-    String gelen_veri = Serial.readStringUntil('\n'); // Enter ile biten veriyi oku
-    gelen_veri.trim(); // Baştaki ve sondaki boşlukları temizle
-    
-  }
+  server.handleClient();
 
-  // -------------------------
-  unsigned long simdi = millis();
-
-  if (simdi - sonKontrolZamani >= kontrolAraligi) {
-    sonKontrolZamani = simdi;
-    
-    int id = getFingerprintID();
-
-    // hatalı okuma
-    if (id == -2) {
-
+  
+  if (isUnlocked) {
+    if (millis() - unlockTime >= kilit_suresi) {
+      digitalWrite(selonoid, LOW); // kilidi artık kapat
+      unoSerial.println("S_OFF");
+      isUnlocked = false;
+      unoSerial.println("Giris modunda|Parmak bekleniyor");
     }
-    // kayıtsız kullanıcı
-    else if (id == -1) {
-        basarisiz_deneme++;
+  }
+  else {
+   
+    unsigned long simdi = millis();
 
+    if (simdi - sonKontrolZamani >= kontrolAraligi) {
+      sonKontrolZamani = simdi;
+      
+      int id = getFingerprintID();
+
+
+      // kayıtsız kullanıcı
+      if (id == -1) {
+        basarisiz_deneme++;
+        log(-1);
+     
         //3.a
         // alarmı devreye sok
         if (basarisiz_deneme == DENEME_HAKKI) {
@@ -276,38 +429,102 @@ void loop() {
         else if (basarisiz_deneme > DENEME_HAKKI) {
         }
         else {
-          unoSerial.println("kayit bulunamadi");
-          delay(3000);
-          unoSerial.println("parmak okut");
-        }
 
-      
-    }
-    // kayıtlı
-    else if (id >= 0) {
-        
-      //3.a
-      // acil durum protokolu aktif durumda, yalnızca yöneticiye izin var
-      if (basarisiz_deneme > DENEME_HAKKI) {
-        
-          // sistemi normala dondur
-          // alarmı sustur
-          if (users[id].is_admin) {
-            basarisiz_deneme = 0;
+            unoSerial.print("Kisi taninmadi!|Deneme: ");
+            unoSerial.println(basarisiz_deneme);
+
+            delay(3000);
+
+            unoSerial.println("Giris modunda|Parmak okutun");
           }
       }
-      else if (users[id].can_open_door) {
-        basarisiz_deneme = 0;
-        Serial.println("kilit acılıyor");
-        unoSerial.println("kilit acildi");
-        digitalWrite(selonoid, HIGH);
-        delay(kilit_suresi);
-        digitalWrite(selonoid, LOW);
-        unoSerial.println("parmak okut");
+      // kayıtlı
+      else if (id >= 0) {
+          
+        log(id);
+        
+        //3.a
+        // acil durum protokolu aktif durumda, yalnızca yöneticiye izin var
+        if (basarisiz_deneme > DENEME_HAKKI) {
+          
+            // sistemi normala dondur
+            // alarmı sustur
+            if (users[id].is_admin) {
+              basarisiz_deneme = 0;
+            }
+        }
+        else if (users[id].can_open_door) {
+          basarisiz_deneme = 0;
+
+          Serial.println("kapıyı aç");
+          unoSerial.println("S_ON");      // kilidi aç
+          unoSerial.print("Hosgeldin|");
+          unoSerial.println(users[id].name);
+
+          unlockTime = millis();       // açılma zamanını kaydet
+          isUnlocked = true;
+        }
       }
     }
   }
 }
+
+
+
+// 1 giriş, 0 çıkış
+void log(int id) {
+  
+  struct tm timeinfo;
+  getLocalTime(&timeinfo);
+
+  char timeString[64];
+  strftime(timeString, sizeof(timeString), "Tarih: %Y-%m-%d  Saat: %H:%M:%S", &timeinfo);
+
+    
+  // Log dosyasına yaz
+  File logFile = SPIFFS.open(logFileName, "a");
+  if (logFile) {
+    if (id == -1) {
+      logFile.print("-1,");
+      logFile.println(timeString);
+      logFile.close();
+      Serial.println("Log dosyasına yazıldı.");
+    }
+    else {
+      if (users[id].is_in)
+        logFile.print("0,");
+      else
+        logFile.print("1,");
+      
+      logFile.print(id);
+      logFile.print(",");
+      logFile.println(timeString);
+      logFile.close();
+      Serial.println("Log dosyasına yazıldı.");
+    } 
+  } 
+  else {
+    Serial.println("Log dosyası açılamadı.");
+  }
+  
+  users[id].is_in = ! users[id].is_in;
+  
+}
+
+
+
+void printLocalTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Zaman alınamadı");
+    return;
+  }
+
+  char timeString[64];
+  strftime(timeString, sizeof(timeString), "Tarih: %Y-%m-%d  Saat: %H:%M:%S", &timeinfo);
+  Serial.println(timeString);
+}
+
 
 
 
@@ -365,8 +582,10 @@ uint8_t enrollFingerprint(String name) {
     return 2;
   }
   int p = -1;
-  Serial.println("Parmak yerleştir...");
-  unoSerial.println("Parmak yerleştir...");
+  
+  unoSerial.print("Kayit modunda|Parmak okut");
+
+
   while (p != FINGERPRINT_OK) {
     p = finger.getImage();
   }
@@ -374,13 +593,13 @@ uint8_t enrollFingerprint(String name) {
   p = finger.image2Tz(1);
   if (p != FINGERPRINT_OK) { Serial.println("Görüntü dönüştürülemedi."); return 0; }
 
-  Serial.println("Parmağı kaldır...");
-  unoSerial.println("Parmağı kaldır...");
+  Serial.println("Parmaği kaldir...");
+  unoSerial.println("Parmagi kaldir");
   delay(2000);
   while (finger.getImage() != FINGERPRINT_NOFINGER);
 
-  Serial.println("Aynı parmağı tekrar yerleştir...");
-  unoSerial.println("Aynı parmağı tekrar yerleştir...");
+  Serial.println("Ayni parmagi|tekrar yerlestir");
+  unoSerial.println("Ayni parmagi|tekrar yerlestir");
   p = -1;
   while (p != FINGERPRINT_OK) {
     p = finger.getImage();
@@ -389,14 +608,14 @@ uint8_t enrollFingerprint(String name) {
   p = finger.image2Tz(2);
   if (p != FINGERPRINT_OK) {
     Serial.println("2. görüntü dönüştürülemedi.");
-    unoSerial.println("2. görüntü dönüştürülemedi.");
+    unoSerial.println("2. görüntü|dönüstürülemedi");
     return 0; 
     }
 
   p = finger.createModel();
   if (p != FINGERPRINT_OK) {
     Serial.println("Model oluşturulamadı.");
-    unoSerial.println("Model oluşturulamadı.");
+    unoSerial.println("Model |olusturulamadi");
     return 0;
   }
 
@@ -410,15 +629,15 @@ uint8_t enrollFingerprint(String name) {
   
     
     Serial.println("✅ Parmak kaydedildi!");
-    unoSerial.println("✅ Parmak kaydedildi!");
-    kaydet_id_ve_isim(id, name);                // hafiza kartına da kaydet
+    unoSerial.println("Parmak|kaydedildi");
+    kaydet_id_ve_isim(id, String(id) +"," +  name);                // hafiza kartına da kaydet
 
 
     return 1;
   } 
   else {
     Serial.println("❌ Kaydetme başarısız.");
-    unoSerial.println("❌ Kaydetme başarısız.");
+    unoSerial.println("Kaydetme|basarisiz");
     return 0;
   }
 }
@@ -436,13 +655,17 @@ int get_empty_index() {
 }
 
 
-
-void kaydet_id_ve_isim(int id, String isim) {
+/*
+user dosyasında ilgili satira kaydeder
+satir = id+1
+text = id,isim
+*/
+void kaydet_id_ve_isim(int id, String text) {
   String lines[user_count];  // maksimum 500 satır destekliyor
   int lineCount = 0;
 
   // 1. aşama: mevcut dosyayı oku
-  File file = SD.open(file_name, FILE_READ);
+  File file = SPIFFS.open(usersFileName, "r");
   if (file) {
     while (file.available()) {
       lines[lineCount] = file.readStringUntil('\n');
@@ -466,10 +689,10 @@ void kaydet_id_ve_isim(int id, String isim) {
 
   // 3. aşama: ilgili satırı değiştir
   int index = satir_numarasi - 1; // dizide 0 tabanlı
-  lines[index] = String(id) + "," + isim;
+  lines[index] = text;
 
   // 4. aşama: dosyayı baştan yaz
-  file = SD.open(file_name, FILE_WRITE);
+  file = SPIFFS.open(usersFileName, "w");
   if (file) {
     file.seek(0);
     file.truncate(0); // eski içeriği sil
@@ -488,72 +711,11 @@ void kaydet_id_ve_isim(int id, String isim) {
 
 
 
-void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
-	if (type == WStype_TEXT) {
-		Serial.println("----");
-  
-
-    // JSON metnini string olarak al
-    String gelen_veri = String((char*)payload);
-    Serial.printf("Gelen mesaj: %s\n", gelen_veri.c_str());
-
-
-    // JSON belgesini oluşturmak için yer aç (statik veya dinamik kullanılabilir)
-    StaticJsonDocument<200> doc;
-
-    // parse et (metni JSON'a çevir)
-    DeserializationError error = deserializeJson(doc, gelen_veri);
-
-    if (error) {
-      Serial.print("JSON HATA: ");
-      Serial.println(error.f_str());
-      return;
-    }
-
-    // Artık JSON içeriğini kullanabilirsin
-    String command = doc["command"]; 
-    Serial.println("command: " + command);
-
-
-
-	
-    if(command.equals("led1")) {
-      Serial.println("ledi yak");
-      digitalWrite(LED_BUILTIN, LOW);
-      webSocket.broadcastTXT("ledi açtım");
-    }
-
-    else if(command.equals("led0")) {
-      Serial.println("ledi sodur");
-      digitalWrite(LED_BUILTIN, HIGH);  
-      webSocket.broadcastTXT("led kapali artık"); 
-    }
-
-    //-------------- kayitli kullanıcı sayısını getir
-    else if (command.equals("sayi")) {
-      int size = finger.templateCount;
-      String mesaj = "size:" + String(size);
-      webSocket.broadcastTXT(mesaj);
-    }
-
-    // ---------------- parmak izini formatla, tüm kayıtları sil
-    else if (command.equals("format")) {
-      if (finger.emptyDatabase() == FINGERPRINT_OK) {
-        Serial.println("Tüm kayıtlar silindi!");
-        webSocket.broadcastTXT("Tüm kayıtlar silindi!");
-      } else {
-        Serial.println("format işlemi başarısız.  [!]");
-        webSocket.broadcastTXT("format işlemi başarısız [!]");
-      }
-    }
-  
-  }
-}
-
-
 
 // direkt sil geç, yoksa da yok
 int delete_user(uint8_t id) {
+
+  kaydet_id_ve_isim(id, "");
 
   uint8_t result = finger.deleteModel(id);
   if (result == FINGERPRINT_OK) {
@@ -581,18 +743,15 @@ int delete_user(uint8_t id) {
 /*
   kayıtlı tüm kullanıcıları JSON şeklinde return eder
 */
-String fetch_users() {
+String fetch_users_eski() {
 
   // JSON oluştur
   StaticJsonDocument<200> doc;
 
-  for (int id = 0; id < 128; id++) {
-    if (users[id].is_valid == 1) {
+  for (int id = 0; id < user_count; id++) 
+    if (users[id].is_valid == 1) 
       doc[String(id)] =  users[id].name;
-    }
-  }
-
-
+    
   // JSON string olarak yaz
   String jsonString;
   serializeJson(doc, jsonString);
@@ -600,3 +759,56 @@ String fetch_users() {
   return jsonString;
 }
 
+
+String fetch_users() {
+  StaticJsonDocument<1024> doc;  // Gerekirse artır
+
+  JsonArray root = doc.to<JsonArray>();
+
+  for (int i = 0; i < user_count; i++) {
+    if (users[i].is_valid == 1) {
+      JsonArray userData = root.createNestedArray();
+      userData.add(i);                       // [0]
+      userData.add(users[i].name);           // [1]
+      userData.add(users[i].is_admin);       // [2]
+      userData.add(users[i].can_open_door);  // [3]
+      userData.add(users[i].is_in);          // [4]
+    }
+  }
+
+  String jsonString;
+  serializeJson(doc, jsonString);
+  return jsonString;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+logs.txt dosyasının return eder 
+giriş çıkış loglarını return eder
+*/
+String get_logs() {
+  File file = SPIFFS.open(logFileName, "r");
+  if (!file) {
+    Serial.println("Dosya açılamadı: " + String(logFileName));
+    return "";
+  }
+
+  String content = "";
+  while (file.available()) {
+    content += file.readStringUntil('\n') + "\n"; // Satır satır okuyup ekliyor
+  }
+  file.close();
+  Serial.println("logs:");
+  Serial.println(content);
+  return content;
+}
