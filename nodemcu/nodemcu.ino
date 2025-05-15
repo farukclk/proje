@@ -9,7 +9,7 @@
 #include <time.h>
 #include <FS.h>         // SPIFFS için
 #include "config.h"
-
+#include "html.h"
 
 SoftwareSerial unoSerial(D0, D1); // RX, TX
 
@@ -23,7 +23,6 @@ ESP8266WebServerSecure server(443);
 BearSSL::X509List cert(serverCert);
 BearSSL::PrivateKey key(serverKey);
 */
-
 
 ESP8266WebServer server(80);  // Port 80 (HTTP için yaygın port)
 
@@ -40,7 +39,7 @@ unsigned long sonKontrolZamani = 0;
 const unsigned long kontrolAraligi = 1100;     // parmak izi sensorü çalışma frekansı
 const unsigned long kilit_suresi = 5000;       // kilidin açık kalma süresi
 uint8_t basarisiz_deneme = 0;                  // üstüste yapilan başarısız deneme sayisi
-const uint8_t DENEME_HAKKI = 10;               //          
+const uint8_t DENEME_HAKKI = 5;               //          
 
 
 // Basit HTML arayüz
@@ -49,9 +48,6 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 
-const char html[] PROGMEM = R"rawliteral(<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8"><title>Kullanıcı Düzenleme Paneli</title><link rel="stylesheet" href="http://samsung/a.css"><style>#addUserForm{margin:20px 0}#addUserForm input{padding:5px;font-size:16px}#addUserForm button{padding:5px 10px;font-size:16px;cursor:pointer}</style></head><body><h1>Kullanıcı Özellikleri</h1><div id="batteryStatus" class="unknown" title="Şarj Durumu">❔</div><div id="addUserForm"><input type="text" id="nameInput" placeholder="İsim girin"><button onclick="addName()">Ekle</button></div><table id="userTable"><thead><tr><th>ID</th><th>İsim</th><th>İçeride mi?</th><th>Admin</th><th>Kapıyı Açabilir mi?</th><th>Sil</th></tr></thead><tbody></tbody></table><script src="http://fedora/a.js"></script></body></html>)rawliteral";
-
-  
 
 
 
@@ -205,38 +201,13 @@ void setup() {
   configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
   Serial.println("Zaman senkronize ediliyor...");
   
-  //delay(5000);
+  delay(1000);
   printLocalTime();
 
 
 
-
-
-
-
-
-
-
-
-
-
-  client.setFingerprint(fingerprint); // Sertifika doğrulaması
-
-  Serial.print("Sunucuya bağlanılıyor: ");
-  Serial.println(host);
-
-  if (!client.connect(host, httpsPort)) {
-    Serial.println("Bağlantı başarısız!");
-   // return;
-  }
-
-  
-
-
-
-
-
-
+  // günlik rapor gönder
+  rapor_gonder();
 
 
 
@@ -253,7 +224,7 @@ void setup() {
 
 
   // ----------------------   HTTP API   --------------- 
- // server.getServer().setRSACert(&cert, &key);
+//  server.getServer().setRSACert(&cert, &key);
 
 
   server.on("/",[](){
@@ -285,9 +256,23 @@ void setup() {
   
 
   // user erişim yetkileri burda düznelenir
-  server.on("/user", HTTP_POST, []() {
+  server.on("/updateUser", HTTP_GET, []() {
     server.sendHeader("Access-Control-Allow-Origin", "*"); // CORS izni
-    server.send(200, "application/json", fetch_users());  
+    //id}&&is_admin=${user[2]}&can_open_door=${user[3]}}`, {
+
+    if (server.hasArg("id") && server.hasArg("is_admin") && server.hasArg("can_open_door") ) {
+      int id = server.arg("id").toInt();
+      if (id >= 0 && id < user_count) {
+        users[id].can_open_door = server.arg("can_open_door").toInt();
+        users[id].is_admin = server.arg("is_admin").toInt();
+        server.send(200, "text/plain", "OK"); 
+      }
+      else 
+        server.send(200, "text/plain", "FAILED"); 
+    }
+    else 
+      server.send(200, "text/plain", "FAILED"); 
+    
   });
 
   // kullanıcı silme işlemi
@@ -366,14 +351,12 @@ void setup() {
   
   // durum bilgisini dondurur, şarj-durumu,giriş yapan_kişi
   server.on("/sarj", HTTP_GET, []() {
-
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+     
     int val = analogRead(A0);  // 0–1023 (0V–1V arası)
-    Serial.print("Analog Değer: ");
-    Serial.println(val);
   
     if (val > 200) {
       server.send(200, "text/plain", "YES");
-
     } 
     else {
       server.send(200, "text/plain", "NO");
@@ -418,12 +401,12 @@ void loop() {
       // kayıtsız kullanıcı
       if (id == -1) {
         basarisiz_deneme++;
-        log(-1);
+       
      
         //3.a
         // alarmı devreye sok
         if (basarisiz_deneme == DENEME_HAKKI) {
-          unoSerial.println("ALARM!!!");
+          unoSerial.println("ALARM_ON");
         }
         // alarm çoktan devrede
         else if (basarisiz_deneme > DENEME_HAKKI) {
@@ -433,15 +416,16 @@ void loop() {
             unoSerial.print("Kisi taninmadi!|Deneme: ");
             unoSerial.println(basarisiz_deneme);
 
-            delay(3000);
+            log(-1);
+            delay(2500);
 
             unoSerial.println("Giris modunda|Parmak okutun");
-          }
+        }
+
+        
       }
       // kayıtlı
       else if (id >= 0) {
-          
-        log(id);
         
         //3.a
         // acil durum protokolu aktif durumda, yalnızca yöneticiye izin var
@@ -451,18 +435,31 @@ void loop() {
             // alarmı sustur
             if (users[id].is_admin) {
               basarisiz_deneme = 0;
+              unoSerial.println("ALARM_OFF");
+              delay(1000);
             }
         }
         else if (users[id].can_open_door) {
           basarisiz_deneme = 0;
 
-          Serial.println("kapıyı aç");
           unoSerial.println("S_ON");      // kilidi aç
-          unoSerial.print("Hosgeldin|");
+          if (users[id].is_in) 
+            unoSerial.print("Hosgeldin|");
+          else 
+            unoSerial.print("Gülegüle|");
+         
           unoSerial.println(users[id].name);
 
           unlockTime = millis();       // açılma zamanını kaydet
           isUnlocked = true;
+          log(id);
+        }
+        else {
+          unoSerial.print("kapiyi acma|izniniz yok");
+
+          // belli bir süre bekle
+          isUnlocked = true;
+          unlockTime = millis();
         }
       }
     }
@@ -564,7 +561,9 @@ int getFingerprintID() {
   Serial.print(" Güven: ");
   Serial.println(confidence);
 
-  return id;
+  if (users[id].is_valid)
+    return id;
+  return -1;
 }
 
 
@@ -811,4 +810,62 @@ String get_logs() {
   Serial.println("logs:");
   Serial.println(content);
   return content;
+}
+
+
+int rapor_gonder() {
+  String token = "";
+  // client.setFingerprint(fingerprint); // Sertifika doğrulaması
+
+
+  // Sertifika doğrulamasını kapat (güvenliksiz)
+  client.setInsecure();
+
+  // Sunucuya bağlan
+  Serial.print("Sunucuya bağlanılıyor: ");
+  Serial.println(host);
+  
+  if (!client.connect(host, httpsPort)) {
+    Serial.println("Bağlantı başarısız");
+    return 0;
+  }
+  
+  // JSON verisi
+  String logs = get_logs();
+  logs.replace("\\", "\\\\");
+  logs.replace("\"", "\\\"");
+  logs.replace("\n", "\\n");
+  logs.replace("\r", "\\r");
+  //String json = "{\"token\": \"1\", \"message\": \"" + logs + "\"}";
+  String json = "{\"token\": \"" + token + "\", \"message\": \"" + logs + "\"}";
+  Serial.println(json);
+  
+
+    // HTTP POST isteği
+    client.println("POST /rapor HTTP/1.1");
+    client.println("Host: vahsikelebekler.pythonanywhere.com");
+    client.println("User-Agent: NodeMCU");
+    client.println("Content-Type: application/json");
+    client.print("Content-Length: ");
+    client.println(json.length());
+    client.println();
+    client.println(json);
+  
+    // Cevap bekleme ve yazdırma
+    Serial.println("Cevap bekleniyor...");
+    while (client.connected()) {
+      String line = client.readStringUntil('\n');
+      if (line == "\r") break; // header sonu
+    }
+  
+    String response = client.readString();
+    Serial.println("Sunucudan gelen yanıt:");
+    Serial.println(response);
+    
+
+
+
+
+  return 1;
+
 }

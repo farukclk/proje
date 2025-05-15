@@ -9,7 +9,7 @@ int rs = 7, en = 6, d4 = 5, d5 = 4, d6 = 3, d7 = 2;   //LCD'nin pin değişkenle
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);              //LCD'nin pin bağlantılarını ayarlıyoruz.
 
 int selonoid = 13;
-
+int alarm = 10;
 
 void setup() {
 
@@ -17,8 +17,10 @@ void setup() {
   Serial.println("başladı uno");
   pinMode(selonoid, OUTPUT);
   digitalWrite(selonoid, LOW);
+  pinMode(alarm, OUTPUT);
+  digitalWrite(alarm, LOW);
   
-  delay(500);
+  delay(100);
  
   lcd.begin(16, 2);                                     //LCD ekranımızın en-boy oranını ayarlıyoruz.                               
   lcd.clear();                                          //LCD'deki eski yazılar temizlenir.
@@ -27,18 +29,16 @@ void setup() {
   lcd.setCursor(0, 1);                                  //LCD'nin 2. satır 1. sütunundan yazmaya başlıyoruz.                               //Uzaklık değerini LCD'ye yazdırıyoruz.
   lcd.print("welcome");
   mySerial.begin(9600);
-
+  
 }
 
 void loop() {
   if(mySerial.available() > 0) { 
-    //webSocket.broadcastTXT(c, sizeof(c));
 
     String gelen_veri = mySerial.readStringUntil('\n'); // Enter ile biten veriyi oku
     gelen_veri.trim(); // Baştaki ve sondaki boşlukları temizle
     
 
-     
     
     int ayrac_index = gelen_veri.indexOf('|');
     
@@ -59,7 +59,10 @@ void loop() {
         digitalWrite(selonoid, HIGH);
       else if (gelen_veri == "S_OFF")
         digitalWrite(selonoid, LOW);
-      
+      else if (gelen_veri == "ALARM_ON")
+        digitalWrite(alarm, HIGH);
+      else if (gelen_veri == "ALARM_OFF")
+        digitalWrite(alarm, LOW);
       else {
         lcd.clear();
         // Eğer | yoksa, her ihtimale karşı sadece birinci satıra yaz
